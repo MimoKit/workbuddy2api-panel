@@ -575,8 +575,8 @@ $('btnActivityAll').onclick = async () => {
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 /* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，
-   /panel/api/model_probes 只读透传。探测键带域前缀（cn:glm-5.2），模型表
-   显示裸名，按「精确命中或 :后缀」关联。无数据时本列退回上游声称值。 */
+   /panel/api/model_probes 只读透传。探测键兼容裸模型名与旧版域前缀（cn:glm-5.2）
+   两种形态，模型表显示裸名，按「精确命中或 :后缀」关联。无数据时本列退回上游声称值。 */
 function fmtK(n) { n = Number(n || 0); return n >= 1000 ? Math.round(n / 1000) + 'K' : String(n); }
 function probeDays(ts) {
   if (!ts) return null;
@@ -637,7 +637,8 @@ async function loadModels() {
       $('mdNote').textContent = '上游未返回模型';
       return;
     }
-    // 探测键带域前缀（cn:glm-5.2），模型表显示裸名，按「精确命中或 :后缀」关联。
+    // 探测键兼容两种形态：裸模型名（新契约）或带域前缀（旧探测文件 cn:glm-5.2），
+    // 后者按「:后缀」兜底关联——两代探测数据都不失效。
     const probeKeys = Object.keys(mdProbes);
     mdProbeOf = id => mdProbes[id] || mdProbes[probeKeys.find(k => k.endsWith(':' + id))];
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
@@ -678,7 +679,12 @@ function mdMatch(m, f) {
       if (!text.includes(kw)) return false;
     }
   }
-  if (f.realm && !String(m.id || '').startsWith(f.realm + ':')) return false;
+  if (f.realm) {
+    // 域筛选按 realms 数组（后端输出的服务域，双域同名模型已合并为一条）；
+    // 兼容旧归档/旧缓存里带前缀、无 realms 字段的条目。
+    const realms = Array.isArray(m.realms) ? m.realms : null;
+    if (realms ? !realms.includes(f.realm) : !String(m.id || '').startsWith(f.realm + ':')) return false;
+  }
   if (f.cap === 'tool' && !m.supports_tool_call) return false;
   if (f.cap === 'vision' && !m.supports_images) return false;
   if (f.cap === 'reasoning' && !m.supports_reasoning) return false;
@@ -721,7 +727,13 @@ function mdRowHtml(m, pr) {
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
   const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+  // 服务域徽标：模型名是裸名（不再带 cn:/global: 前缀），域名由 realms 数组表达；
+  // 双域同名模型后端已合并为一条，这里按数组逐个打标。
+  const realms = Array.isArray(m.realms) ? m.realms : [];
+  const realmHtml = realms.length
+    ? '<div class="id" style="margin-top:2px">' + realms.map(x => '<span class="tag">' + (x === 'global' ? '国际版' : '国内版') + '</span>').join(' ') + '</div>'
+    : '';
+  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + realmHtml + capHtml + '</td>' +
     '<td class="num">' + rateCell(m) + '</td>' +
     '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
     '<td class="efs" style="white-space:normal">' + effs + '</td>' +

@@ -335,16 +335,17 @@ const ctx = { Number, String, Array, Object, isFinite, parseFloat };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.mdMatch=mdMatch; this.mdSortList=mdSortList; this.mdRateValue=mdRateValue;', ctx);
 const models = [
-  { id: 'cn:glm-5.2', name: 'GLM-5.2', vendor: 'Zhipu', tags: ['视觉'], supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: true, supported_efforts: ['high', 'xhigh'], default_effort: 'high', is_default: false, credits: '0.79', promo_factor: 0.5, promo_credits: '0.40', promo_label: '夜间折扣', context_length: 1000000, max_output_tokens: 131000 },
-  { id: 'cn:hy3', name: 'Hy3', supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: false, supported_efforts: ['low', 'high'], default_effort: 'high', is_default: false, credits: '0', promo_factor: 0, promo_credits: '0', promo_label: '限时免费', context_length: 192000, max_output_tokens: 64000 },
-  { id: 'global:hy3', name: 'Hy3 Global', supports_tool_call: false, supports_images: false, supports_reasoning: false, supported_efforts: [], is_default: false, credits: '0.11', context_length: 1000000, max_output_tokens: 393000 },
-  { id: 'cn:auto', name: 'Auto', supports_tool_call: true, supports_images: true, supports_reasoning: true, is_default: true, credits: null, context_length: 256000, max_output_tokens: 32000 },
+  { id: 'glm-5.2', realms: ['cn'], name: 'GLM-5.2', vendor: 'Zhipu', tags: ['视觉'], supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: true, supported_efforts: ['high', 'xhigh'], default_effort: 'high', is_default: false, credits: '0.79', promo_factor: 0.5, promo_credits: '0.40', promo_label: '夜间折扣', context_length: 1000000, max_output_tokens: 131000 },
+  { id: 'hy3', realms: ['cn', 'global'], name: 'Hy3', supports_tool_call: true, supports_images: true, supports_reasoning: true, can_disable_thinking: false, supported_efforts: ['low', 'high'], default_effort: 'high', is_default: false, credits: '0', promo_factor: 0, promo_credits: '0', promo_label: '限时免费', context_length: 192000, max_output_tokens: 64000 },
+  { id: 'gpt-6-sol', realms: ['global'], name: 'GPT-6-Sol', supports_tool_call: false, supports_images: false, supports_reasoning: false, supported_efforts: [], is_default: false, credits: '0.11', context_length: 1000000, max_output_tokens: 393000 },
+  { id: 'cn:legacy', name: 'Legacy', supports_tool_call: true, supports_images: true, supports_reasoning: true, is_default: true, credits: null, context_length: 256000, max_output_tokens: 32000 },
 ];
 const ids = list => list.map(m => m.id);
 const filter = f => ids(ctx.mdSortList(models.filter(m => ctx.mdMatch(m, f)), f));
 process.stdout.write(JSON.stringify({
   all: ids(models),
   realm: filter({ realm: 'cn' }),
+  realmGlobal: filter({ realm: 'global' }),
   tool: filter({ cap: 'tool' }),
   vision: filter({ cap: 'vision' }),
   reasoning: filter({ cap: 'reasoning' }),
@@ -375,23 +376,26 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("model filter node test failed: %v\n%s", err, out)
 	}
-	const want = `{"all":["cn:glm-5.2","cn:hy3","global:hy3","cn:auto"],` +
-		`"realm":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"tool":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"vision":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"reasoning":["cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"isDefault":["cn:auto"],` +
-		`"effortOff":["cn:glm-5.2"],` +
-		`"effortLow":["cn:hy3"],` +
-		`"free":["cn:hy3"],` +
-		`"promo":["cn:glm-5.2","cn:hy3"],` +
-		`"discount":["cn:glm-5.2"],` +
-		`"q":["cn:glm-5.2"],` +
+	// 域筛选按 realms 数组命中（gpt-6-sol 只在 global；cn:legacy 是无 realms 的旧数据，
+	// 由「:前缀」兜底仍归 cn）；跨域同名模型（hy3）在两边都命中同一行。
+	const want = `{"all":["glm-5.2","hy3","gpt-6-sol","cn:legacy"],` +
+		`"realm":["glm-5.2","hy3","cn:legacy"],` +
+		`"realmGlobal":["hy3","gpt-6-sol"],` +
+		`"tool":["glm-5.2","hy3","cn:legacy"],` +
+		`"vision":["glm-5.2","hy3","cn:legacy"],` +
+		`"reasoning":["glm-5.2","hy3","cn:legacy"],` +
+		`"isDefault":["cn:legacy"],` +
+		`"effortOff":["glm-5.2"],` +
+		`"effortLow":["hy3"],` +
+		`"free":["hy3"],` +
+		`"promo":["glm-5.2","hy3"],` +
+		`"discount":["glm-5.2"],` +
+		`"q":["glm-5.2"],` +
 		`"qMiss":[],` +
-		`"sortRate":["cn:hy3","global:hy3","cn:glm-5.2","cn:auto"],` +
-		`"sortContext":["cn:glm-5.2","global:hy3","cn:auto","cn:hy3"],` +
-		`"sortOutput":["global:hy3","cn:glm-5.2","cn:hy3","cn:auto"],` +
-		`"sortName":["cn:auto","cn:glm-5.2","cn:hy3","global:hy3"],` +
+		`"sortRate":["hy3","gpt-6-sol","glm-5.2","cn:legacy"],` +
+		`"sortContext":["glm-5.2","gpt-6-sol","cn:legacy","hy3"],` +
+		`"sortOutput":["gpt-6-sol","glm-5.2","hy3","cn:legacy"],` +
+		`"sortName":["cn:legacy","glm-5.2","gpt-6-sol","hy3"],` +
 		`"rateFree":0,"rateMissing":null}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("model filter=%s\nwant %s", out, want)

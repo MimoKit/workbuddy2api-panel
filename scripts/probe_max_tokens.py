@@ -14,12 +14,12 @@ OpenAI 兼容端点的「真实输出上限」探测工具
   finish=stop   且 输出 < 请求  → 模型自己不想写了，**不可作判据**，需强化提示重试
 
 用法：
-  # 测某网关全部以给定前缀开头的模型（默认 cn:）
+  # 测网关 /v1/models 里的全部模型（模型名即裸名，域由网关按目录自动路由）
   python probe_max_tokens.py --base http://211.154.25.123:7863/v1 --key sk-xxx
 
-  # 指定模型 / 多个前缀 / 只看计划
+  # 指定模型 / 前缀过滤 / 只看计划
   python probe_max_tokens.py --base ... --key ... --models flash,glm-5.3
-  python probe_max_tokens.py --base ... --key ... --prefix cn: --prefix global:
+  python probe_max_tokens.py --base ... --key ... --prefix deepseek --prefix gpt-
   python probe_max_tokens.py --base ... --key ... --dry-run
 
   # 控制成本与时长
@@ -29,7 +29,7 @@ OpenAI 兼容端点的「真实输出上限」探测工具
   - 控制台表格：模型 | 声称上限 | 实测上限 | 判据 | 耗时
   - JSONL 落盘（--out，默认 probe-max-tokens.jsonl），**支持 --resume 断点续测**
   - --panel-out PATH 额外写面板契约文件（默认关闭；网关面板「模型与档位」的实测列读它）：
-      {"version":1,"probes":{"cn:glm-5.2":{"claimed":131072,"measured":48000,
+      {"version":1,"probes":{"glm-5.2":{"claimed":131072,"measured":48000,
        "verdict":"clamped|at_least|inconclusive","note":"原始判据文本",
        "tested_at":"...","source":"probe_max_tokens.py"}}}
     写入为合并语义：未重测的模型保留旧记录；文件放网关 state 文件同目录
@@ -288,7 +288,7 @@ def main() -> None:
     ap.add_argument("--base", required=True, help="接口基址，如 http://host:7863/v1")
     ap.add_argument("--key", default=None, help="API Key（也可用环境变量 PROBE_API_KEY）")
     ap.add_argument("--prefix", action="append", default=None,
-                    help="只测以此前缀开头的模型（可多次；默认 cn:）")
+                    help="只测以此前缀开头的模型（可多次；默认全部模型）")
     ap.add_argument("--models", default=None, help="按子串匹配模型 id（逗号分隔，优先级高于 --prefix）")
     ap.add_argument("--tiers", default="40000,100000",
                     help="阶梯请求值，逗号分隔（默认 40000,100000；越高越慢越费额度）")
@@ -322,8 +322,8 @@ def main() -> None:
     if args.models:
         kws = [k.strip().lower() for k in args.models.split(",") if k.strip()]
         def _match(mid: str) -> int:
-            """返回匹配优先级：0=不匹配，3=带前缀的完整 id，2=后缀精确，1=子串。
-            关键词含 ':' 时按完整 id 比对（cn:xxx 只命中 cn:xxx，不含 global:xxx）。"""
+            """返回匹配优先级：0=不匹配，3=完整 id（含冒号的精确比对），2=后缀精确，1=子串。
+            带冒号关键词按完整 id 比对（兼容旧版带域前缀的 id，如 cn:xxx 只命中 cn:xxx）。"""
             low = mid.lower()
             for k in kws:
                 if ":" in k and low == k:
@@ -338,9 +338,12 @@ def main() -> None:
         scored = [(m, _match(m["id"])) for m in all_models]
         best = max((s for _, s in scored), default=0)
         targets = [m for m, s in scored if s == best and s > 0]
+    elif args.prefix:
+        # 显式前缀过滤（可多次）——按裸模型名前缀匹配。
+        targets = [m for m in all_models if any(m["id"].startswith(p) for p in args.prefix)]
     else:
-        prefixes = args.prefix or ["cn:"]
-        targets = [m for m in all_models if any(m["id"].startswith(p) for p in prefixes)]
+        # 默认全部模型：/v1/models 已输出裸名，域由网关自动路由，不再需要 cn:/global: 前缀筛选。
+        targets = list(all_models)
     if args.limit:
         targets = targets[:args.limit]
     if not targets:

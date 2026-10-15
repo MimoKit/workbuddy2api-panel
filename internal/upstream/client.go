@@ -629,6 +629,12 @@ type Client struct {
 	// modelRates 缓存各模型当前生效积分倍率（规范化数值，如 "0.5"）。
 	// 与 efforts 共用 realm 分层和锁；每次成功刷新模型目录时整体替换对应域。
 	modelRates map[string]map[string]string
+	// catalogIDs 各域最近一次**成功**拉取的模型 id 全集（FetchModels / global 目录探测
+	// 成功时整体替换）。供裸模型名的跨域自动路由判定「该模型在哪个域有目录」：
+	// 两域都有 → 先 cn 后 global 自动切换；只有一域有 → 直接钉死该域（避免把
+	// CN 独有模型打到 global 号上白吃一发 11102）。
+	// 与 efforts/modelRates 共用 effortsMu（同属目录派生的只读快照）。
+	catalogIDs map[string]map[string]bool
 
 	// globalModels 缓存 global 模型名目录探测结果（成功 ∩ 静态 overlay；
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
@@ -1267,6 +1273,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	c.storeModelRates(a.Realm(), out)
+	// 跨域自动路由的域索引：该域本次成功下发的模型 id 全集（整体替换）。
+	c.storeCatalogIDs(a.Realm(), modelIDsOf(out))
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入桶）。
 	// 空桶时跳过写：避免「某探测无档位数据」清掉既有桶。
 	cache := make(map[string][]string, len(out))
@@ -1632,6 +1640,56 @@ func (c *Client) ModelRate(realm, model string) string {
 	c.effortsMu.RLock()
 	defer c.effortsMu.RUnlock()
 	return c.modelRates[realmKey(realm)][model]
+}
+
+// storeCatalogIDs 按 realm **整体替换**该域的模型 id 目录（仅在目录拉取成功时调用）。
+//
+// 整体替换而非合并：上游下架的模型必须随之从路由判定里消失，否则自动路由会把
+// 请求继续送往一个已经不再提供该模型的域。
+func (c *Client) storeCatalogIDs(realm string, ids []string) {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			set[id] = true
+		}
+	}
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.catalogIDs == nil {
+		c.catalogIDs = make(map[string]map[string]bool)
+	}
+	c.catalogIDs[realmKey(realm)] = set
+}
+
+// modelIDsOf 从目录条目抽模型 id（storeCatalogIDs 的入参来源）。
+func modelIDsOf(infos []ModelInfo) []string {
+	ids := make([]string, 0, len(infos))
+	for _, mi := range infos {
+		if mi.ID != "" {
+			ids = append(ids, mi.ID)
+		}
+	}
+	return ids
+}
+
+// ModelRealms 返回该模型在目录中出现过的域，固定 cn → global 顺序；供裸模型名
+// 跨域自动路由决定候选域（cn 优先，global 兜底）。
+//
+// 两域目录都没有这个模型（尚未探测 / 探测失败 / 上游未下发）→ nil：调用方不得
+// 据此判定「模型不存在」（目录可能是冷的），应回落到「有账号的域」兜底。零上游调用。
+func (c *Client) ModelRealms(model string) []string {
+	if c == nil || model == "" {
+		return nil
+	}
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	var out []string
+	for _, realm := range [...]string{"cn", "global"} {
+		if c.catalogIDs[realm][model] {
+			out = append(out, realm)
+		}
+	}
+	return out
 }
 
 // GlobalEffortSnapshot 导出 global 域 effort 能力缓存（探测下发 ∪ 静态兜底合并后的桶），

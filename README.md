@@ -164,7 +164,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
 | **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
 | **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
-| **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
+| **模型名即裸名 + 跨域自动路由** | 模型列表与请求一律使用上游裸模型名（**不带 `cn:` / `global:` 前缀**）：同名模型国内版/国际版都有时合并为一条并带 `realms` 域标记，请求按「先国内、再国际版」自动轮换（见「模型名与国内版 / 国际版自动路由」） |
+| **模型能力透出** | `/v1/models` 附带 `reasoning_supported_efforts` / `reasoning_default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 | **原生工具调用标记还原** | 上游（DeepSeek 系）的工具调用原生语法是带全角竖线的标记文本，**仅在请求声明了 `tools` 时**才被上游解析成结构化 `tool_calls`。实测 `tools` 声明在中转环节（Responses → chat/completions 等）丢失是常态，此时模型仍想调工具，标记就以纯文本落进 `content`——Codex 这类只执行结构化 `function_call` 的客户端会把它当普通正文写进会话历史，回合直接结束、工具一次都没跑。网关在出站响应里识别并还原成 `tool_calls`（流式与非流式都覆盖） |
@@ -688,11 +689,27 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
-| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
+| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 10min；失败返回空列表 + 5min 负缓存）；模型名为**裸名**，同名的国内版/国际版模型合并为一条并带 `realms` 域标记（见下「模型名与国内版 / 国际版自动路由」）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+
+### 模型名与国内版 / 国际版自动路由
+
+模型名就是上游的模型名，**不带 `cn:` / `global:` 前缀**：
+
+- `GET /v1/models` 只输出裸名；同名的国内版 / 国际版模型**合并为一条**，服务域放在 `realms`
+  数组里（`["cn"]` / `["global"]` / `["cn","global"]`），字段以上游国内版目录为准。
+- `POST /v1/chat/completions` 直接填裸名即可：网关按两域模型目录判断该模型属于哪个域——
+  两域都有 → **先国内、再国际版**自动轮换（首个账号失败即切到另一域，`max_rotate` 内完成）；
+  只有一个域有 → 直接钉死该域（不会把国内版独有模型打到国际版账号上白吃一发 11102）。
+- 目录尚未探测（冷启动/探测失败）时回落到「池里实际有账号的域」：**纯国际版账号池也能用裸名**，
+  不再必须写 `global:`。
+- 旧协议仍兼容：显式带 `cn:` / `global:` 前缀的模型名依旧按该域钉死路由（临时指定单域用），
+  但列表输出与请求日志一律使用裸名。
+- `global.enabled=false`（纯国内版逃生门）时恒按国内版路由，且列表不列国际版模型。
+- 会话粘性按裸模型名绑定，可落在任一域的账号上；域不匹配时自动解绑重分配。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
@@ -809,7 +826,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 # 断点续测 / 只测指定模型 / 预览计划
 ... --resume
-... --models cn:glm-5.2 --panel-out data/output_probes.json
+... --models glm-5.2 --panel-out data/output_probes.json
 ... --dry-run
 ```
 

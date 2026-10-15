@@ -859,12 +859,22 @@ func TestModelsEndpoint(t *testing.T) {
 	}
 	found := false
 	for _, m := range data {
-		if m.(map[string]any)["id"] == "cn:glm-5.2" {
+		mm := m.(map[string]any)
+		id, _ := mm["id"].(string)
+		// 前缀已退役：列表输出裸模型名，服务域改由 realms 数组表达。
+		if strings.HasPrefix(id, "cn:") || strings.HasPrefix(id, "global:") {
+			t.Errorf("model id must be bare (no realm prefix), got %q", id)
+		}
+		if id == "glm-5.2" {
 			found = true
+			rs, _ := mm["realms"].([]any)
+			if len(rs) != 1 || rs[0] != "cn" {
+				t.Errorf("glm-5.2 realms=%v want [cn]", mm["realms"])
+			}
 		}
 	}
 	if !found {
-		t.Error("cn:glm-5.2 missing")
+		t.Error("glm-5.2 missing")
 	}
 }
 
@@ -894,14 +904,27 @@ func TestModelsDynamic(t *testing.T) {
 		t.Fatalf("want 3 dynamic models, got %d: %v", len(data), data)
 	}
 	ids := map[string]bool{}
+	realms := map[string][]any{}
 	for _, m := range data {
-		ids[m.(map[string]any)["id"].(string)] = true
+		mm := m.(map[string]any)
+		id := mm["id"].(string)
+		ids[id] = true
+		rs, _ := mm["realms"].([]any)
+		realms[id] = rs
 	}
-	if !ids["cn:dyn-model-a"] || !ids["cn:glm-9.9"] {
+	if !ids["dyn-model-a"] || !ids["glm-9.9"] {
 		t.Errorf("dynamic ids missing: %v", ids)
 	}
+	for id, rs := range realms {
+		if len(rs) != 1 || rs[0] != "cn" {
+			t.Errorf("%s realms=%v want [cn]", id, rs)
+		}
+	}
 
-	// 断言字段映射：maxInputTokens → context_length，maxOutputTokens → max_output_tokens
+	// 断言字段映射：maxInputTokens → context_length，maxOutputTokens → max_output_tokens。
+	// 注意 switch 的 case 是**裸模型名**：前缀时代这段 switch 整段空转（case 永不命中），
+	// 裸名化后恢复生效；字段键同实际输出口径（/v1/models 的 effort 字段带 reasoning_ 前缀，
+	// 面板端点才叫 supported_efforts）。
 	for _, m := range data {
 		mm := m.(map[string]any)
 		switch mm["id"] {
@@ -912,21 +935,21 @@ func TestModelsDynamic(t *testing.T) {
 			if mm["max_output_tokens"].(float64) != 8192 {
 				t.Errorf("dyn-model-a max_output_tokens=%v want 8192", mm["max_output_tokens"])
 			}
-			// reasoning 档位透出：supported_efforts + default_effort
-			efforts, _ := mm["supported_efforts"].([]any)
+			// reasoning 档位透出：reasoning_supported_efforts + reasoning_default_effort
+			efforts, _ := mm["reasoning_supported_efforts"].([]any)
 			if len(efforts) != 3 || efforts[0] != "low" {
-				t.Errorf("dyn-model-a supported_efforts=%v", mm["supported_efforts"])
+				t.Errorf("dyn-model-a reasoning_supported_efforts=%v", mm["reasoning_supported_efforts"])
 			}
-			if mm["default_effort"] != "medium" {
-				t.Errorf("dyn-model-a default_effort=%v want medium", mm["default_effort"])
+			if mm["reasoning_default_effort"] != "medium" {
+				t.Errorf("dyn-model-a reasoning_default_effort=%v want medium", mm["reasoning_default_effort"])
 			}
 		case "dyn-model-b":
 			// 上游未返回 reasoning → 两个档位字段都省略（客户端按自身默认）
-			if _, has := mm["supported_efforts"]; has {
-				t.Errorf("dyn-model-b supported_efforts should be omitted, got %v", mm["supported_efforts"])
+			if _, has := mm["reasoning_supported_efforts"]; has {
+				t.Errorf("dyn-model-b reasoning_supported_efforts should be omitted, got %v", mm["reasoning_supported_efforts"])
 			}
-			if _, has := mm["default_effort"]; has {
-				t.Errorf("dyn-model-b default_effort should be omitted")
+			if _, has := mm["reasoning_default_effort"]; has {
+				t.Errorf("dyn-model-b reasoning_default_effort should be omitted")
 			}
 		case "glm-9.9":
 			if mm["context_length"].(float64) != 262144 {

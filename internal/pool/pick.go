@@ -39,6 +39,30 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 	return p.pick(tried, reqModel, realm)
 }
 
+// PickExcludingForRealms 模型感知 + 多域**有序**选号（裸模型名跨域自动路由的选号入口）：
+// 按 realms 顺序取第一个能给出账号的域，域内沿用 pick 的全套语义（权重/成本分层/
+// 积分保底/在途过滤/全冷却兜底）。某域此刻给不出账号（冷却到底/被 tried 排除/
+// 池内无该域账号）→ 自然落到下一域；realms 为空 = 不过滤（等价 PickExcludingForModel）。
+//
+// 为什么按域逐个选而不是合并成一个候选集：合并后 global 号会与 cn 号一起参与加权
+// 抽签，CN 独有模型会被抽到 global 号上白吃一发 11102（并给该号留下模型级负缓存）。
+// 按序取域让「先国内、再国际」成为确定性行为；调用方通过轮换 realms 起点实现双域
+// 轮转（handler.pickAcrossRealms）。
+func (p *Pool) PickExcludingForRealms(tried map[string]bool, reqModel string, realms []string) *auth.Auth {
+	switch len(realms) {
+	case 0:
+		return p.pick(tried, reqModel, "")
+	case 1:
+		return p.pick(tried, reqModel, realms[0])
+	}
+	for _, realm := range realms {
+		if a := p.pick(tried, reqModel, realm); a != nil {
+			return a
+		}
+	}
+	return nil
+}
+
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。

@@ -152,3 +152,30 @@ func TestPickExcludingForRealmTried(t *testing.T) {
 		t.Fatalf("picked non-cn %s", a.UID)
 	}
 }
+
+// TestPickExcludingForRealmsOrdered 有序跨域选号（裸模型名自动路由的选号基础）：
+// 按 realms 顺序取第一个能出号的域，起始域被 tried/冷却耗尽后自然落到下一域。
+func TestPickExcludingForRealmsOrdered(t *testing.T) {
+	p := realmPool(t)
+
+	// 首域 cn 有号 → 只出 cn（不因 global 也在候选里就抽到 global）。
+	if a := p.PickExcludingForRealms(nil, "glm-5.2", []string{"cn", "global"}); a == nil || realmOf(a) != "cn" {
+		t.Fatalf("首域 cn 应优先出号, got %v", a)
+	}
+	// 轮换起点换成 global：同样只在 global 内出号。
+	if a := p.PickExcludingForRealms(nil, "glm-5.2", []string{"global", "cn"}); a == nil || realmOf(a) != "global" {
+		t.Fatalf("起始域 global 应出 global 号, got %v", a)
+	}
+	// cn 两个号都被 tried → 落到 global（跨域兜底）。
+	if a := p.PickExcludingForRealms(map[string]bool{"cn1": true, "cn2": true}, "glm-5.2", []string{"cn", "global"}); a == nil || realmOf(a) != "global" {
+		t.Fatalf("cn 用尽应落到 global, got %v", a)
+	}
+	// 只看 cn：cn 用尽即 nil（不得越域偷 global 号）。
+	if a := p.PickExcludingForRealms(map[string]bool{"cn1": true, "cn2": true}, "glm-5.2", []string{"cn"}); a != nil {
+		t.Fatalf("钉死 cn 时不得返回 global 号, got %v", a.UID)
+	}
+	// 空 realms = 不过滤（老语义：全池可选中）。
+	if a := p.PickExcludingForRealms(nil, "glm-5.2", nil); a == nil {
+		t.Fatal("空 realms 应等价不过滤")
+	}
+}

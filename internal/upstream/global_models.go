@@ -156,6 +156,9 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	c.globalModels.fetched = time.Now()
 	c.globalModels.lastFail = time.Time{}
 	c.globalModels.Unlock()
+	// 跨域自动路由的域索引：global 域本次成功下发的模型名（窄表形态 infos 为 nil，
+	// 故用 names 而非 infos——names 才是权威清单）。
+	c.storeCatalogIDs("global", merged)
 	return merged, infos
 }
 

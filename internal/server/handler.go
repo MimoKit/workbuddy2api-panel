@@ -58,8 +58,8 @@ type Config struct {
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
-	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
-	// （modelList 不列 global 名单）。
+	// false（显式逃生门）时裸名恒按 cn 路由、modelList 不列 global 名单
+	// （global 账号的 Realm() 也已被 auth 开关压回 cn）。
 	GlobalEnabled bool
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
@@ -354,17 +354,24 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	return entry
 }
 
-// modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
-// 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
-// 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
+// modelList 模型列表（纯动态：拉取失败/无号 → 该域空列表，无静态兜底）。
+//
+// 模型名 = **裸名**，不带任何域前缀：同名的 CN / global 模型合并为一条（同一个模型
+// 在列表里出现两次，按 id 建索引的客户端会互相覆盖），服务域放在 "realms" 数组里
+// （["cn"] / ["global"] / ["cn","global"]）供面板筛选与运维判读。合并时 CN 条目字段
+// 权威（国内版目录字段更全），global 只追加域标记。
+//
+// 路由不依赖本列表：裸名请求由 chatCompletions 的 routeRealms 按目录自动选域。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
+	index := make(map[string]int) // 裸模型名 → out 下标（跨域去重的唯一键）
 	for _, mi := range h.fetchDynamicModels() {
 		entry := map[string]any{
-			"id":       "cn:" + mi.ID,
+			"id":       mi.ID,
 			"object":   "model",
 			"created":  1753600000,
 			"owned_by": "workbuddy",
+			"realms":   []string{"cn"},
 		}
 		// context_length / max_output_tokens 四级查找（upstream.model_catalog）：
 		// 上游动态值（maxInputTokens/maxOutputTokens）权威 → 静态种子表 →
@@ -386,6 +393,7 @@ func (h *Handler) modelList() []map[string]any {
 				entry["reasoning_default_effort"] = def
 			}
 		}
+		index[mi.ID] = len(out)
 		out = append(out, entry)
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
@@ -403,11 +411,17 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
+			if idx, ok := index[id]; ok {
+				// 同名模型两域都有：合并为一条（CN 字段权威），只追加服务域标记。
+				addModelRealm(out[idx], "global")
+				continue
+			}
 			entry := map[string]any{
-				"id":       "global:" + id,
+				"id":       id,
 				"object":   "model",
 				"created":  1753600000,
 				"owned_by": "workbuddy",
+				"realms":   []string{"global"},
 			}
 			// context_length / max_output_tokens 四级查找（与 CN 动态分支同口径）。
 			var remoteCtx, remoteOut int64
@@ -425,10 +439,22 @@ func (h *Handler) modelList() []map[string]any {
 					entry["reasoning_default_effort"] = def
 				}
 			}
+			index[id] = len(out)
 			out = append(out, entry)
 		}
 	}
 	return out
+}
+
+// addModelRealm 给已存在的模型条目追加一个服务域（幂等、保序）。
+func addModelRealm(entry map[string]any, realm string) {
+	cur, _ := entry["realms"].([]string)
+	for _, r := range cur {
+		if r == realm {
+			return
+		}
+	}
+	entry["realms"] = append(cur, realm)
 }
 
 // fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
@@ -532,17 +558,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 在提示词/模型名改写之前取（那些改写不动 tools / messages[].tool_calls 子树）。
 	declaredTools := upstream.ToolNameAllowlist(body)
 
-	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
-	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	// 模型名解析：显式 "[realm:]" 前缀（旧协议兼容输入）钉死单域；裸名交给目录自动路由。
+	// bareModel 用于选号/粘性/出站 body 重写（上游只认裸名，前缀绝不透传上游）。
+	pinnedRealm, bareModel := resolveModel(peek.Model)
+	// 候选域（有序，cn 优先）：显式前缀 → 单域；裸名 → 模型目录命中的域（两域都有
+	// 则按 attempt 轮换先后，实现「先国内、再国际版」）；目录未覆盖 → 池里有账号的域。
+	realms := h.routeRealms(bareModel, pinnedRealm)
+	// 倍率（积分保底兜底/用量账本）在选中账号后按**实际服务域**取——跨域自动路由下
+	// 请求前不知道最终落在哪个域，按请求域预取会把 cn 倍率记到 global 命中上。
 	modelRate := ""
-	if h.cfg.Upstream != nil {
-		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
-	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	if bareModel != "" {
+		// 流水/归档记 canonical 裸名：旧客户端发 "cn:xxx" 时日志里也不再出现前缀。
+		st.model = bareModel
+	}
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -565,7 +596,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		// 传裸名：粘性闭包按裸名给两域并集候选（会话可落在任一域，域合法性下方按
+		// realms 校验），显式域前缀的场景由闭包自行解析。
+		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, bareModel); ok {
 			stickyUID = uid
 		}
 	}
@@ -744,17 +777,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
-				// 本次回落普通轮换。
+			if acct == nil || !realmAllowed(acct.Realm(), realms) {
+				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额），或所在域不在
+				// 本次候选集（目录变化/显式前缀钉死别的域）→ 解绑，本次回落普通轮换。
 				unbindSticky()
 				acct = nil
 			}
 		}
 		if acct == nil {
-			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// 模型感知 + 跨域有序选号：attempt i 从 realms[i%n] 起轮（先国内、再国际版），
+			// 起始域此刻无号则按序跨域兜底；模型非空时启用 6004 模型级冷却豁免
+			// （healthyForModel），域谓词由选号器按候选序列过滤。
+			acct = h.pickAcrossRealms(tried, bareModel, realms, i)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -769,6 +803,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		// 倍率按**实际服务域**取：账号域即上游计费域，与用量账本/积分保底同口径。
+		if h.cfg.Upstream != nil {
+			modelRate = h.cfg.Upstream.ModelRate(acct.Realm(), bareModel)
+		}
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。

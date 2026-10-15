@@ -312,12 +312,24 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 
 // models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：
 // 回答"该模型到底支持哪几档思考"。顺带刷新 client 的 effort 降级能力缓存。
-// 与 /v1/models 同口径的双域输出：CN 域模型加 "cn:" 前缀、global 域加 "global:" 前缀
-// （gateway 路由协议，前端显示的 id 就是调用时要填的完整 model 值）。
+//
+// 与 /v1/models 同口径：**裸模型名**（不带 cn:/global: 前缀），同名的 CN / global
+// 模型合并为一条，服务域放在 "realms" 数组里（["cn"]/["global"]/["cn","global"]）——
+// 前端按域筛选与打域标签都读该字段，不再从名字前缀推断。
 // 各域独立探测、独立容错：某域无可用账号则整域跳过；两域全空时才报错
 // （有错误明细回 502，一个账号都没有回 503）。
 func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
+	index := make(map[string]int) // 裸模型名 → out 下标（跨域去重）
+	add := func(entry map[string]any) {
+		id, _ := entry["id"].(string)
+		if idx, ok := index[id]; ok {
+			mergePanelRealm(out[idx], entry) // 同名两域都有：合并为一条
+			return
+		}
+		index[id] = len(out)
+		out = append(out, entry)
+	}
 	var fetchErrs []string
 
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
@@ -329,7 +341,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
 			} else {
 				for _, mi := range infos {
-					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+					add(panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
 				}
 			}
 		}
@@ -346,7 +358,7 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				} else {
 					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
 					for _, mi := range infos {
-						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
+						add(panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
 					}
 				}
 			}
@@ -364,12 +376,34 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
 }
 
-// panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
+// mergePanelRealm 把后到域的服务域并进已有模型条目（realms 去重保序）；字段仍以
+// 先到的域为准（CN 先于 global，与 /v1/models 同口径），不覆盖已写好的展示字段。
+func mergePanelRealm(dst, src map[string]any) {
+	cur, _ := dst["realms"].([]string)
+	add, _ := src["realms"].([]string)
+	for _, r := range add {
+		dup := false
+		for _, x := range cur {
+			if x == r {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			cur = append(cur, r)
+		}
+	}
+	dst["realms"] = cur
+}
+
+// panelModelEntry 构造单个模型条目（两域共用）：id 为**裸模型名**（调用值 = 上游模型名，
+// 落哪个域由网关按目录自动路由），服务域单独放 "realms"（同名跨域由 models 合并）。
 // context_length / max_output_tokens 走四级查找链，effort 档位按 realm 域取
 // EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
 	entry := map[string]any{
-		"id":                   realm + ":" + mi.ID,
+		"id":                   mi.ID,
+		"realms":               []string{realm},
 		"name":                 mi.Name,
 		"default_effort":       mi.DefaultEffort,
 		"supported_efforts":    mi.Efforts,

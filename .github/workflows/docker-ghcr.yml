@@ -30,7 +30,10 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  # github.repository 自动小写化，得到 ghcr.io/linguo2625469/workbuddy2api-panel
+  # 仓库全名（owner/repo）。注意 GHCR 要求镜像路径**全小写**，而 owner 可能含大写
+  # （本 fork 即 MimoKit/workbuddy2api-panel）——若直接拼进 images，build-push-action
+  # 会以 "invalid reference format: repository name must be lowercase" 失败。
+  # 故下方用 shell 参数展开 ${VAR,,} 归一化后再交给 metadata-action。
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -57,11 +60,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 归一化镜像名（GHCR 要求全小写）
+        id: img
+        run: echo "ref=${REGISTRY}/${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.img.outputs.ref }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch

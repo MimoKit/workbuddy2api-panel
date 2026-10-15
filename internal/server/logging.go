@@ -469,9 +469,10 @@ func (o *responseObserver) Unwrap() http.ResponseWriter { return o.ResponseWrite
 // 是为了让 stdout 里成百上千行能竖着扫——否则模型名长短不一、中文昵称按字节补空格
 // 错位，根本没法用肉眼对齐着一列列看（这正是上一版 11 字节硬截断要解决的问题）。
 const (
-	// chatModelWidth 覆盖 realm 前缀 + 最长模型名："global:" (7) + "deepseek-v4.1-flash" (19) = 26。
-	// 旧的 11 字节截断会把 "cn:deepseek-v4-flash" 切成 "cn:deepseek"，让人误以为是另一个模型。
-	chatModelWidth = 26
+	// chatModelWidth 覆盖最长上游模型名（裸名，无域前缀）："deepseek-v4.1-flash" (19) + 1 列余量。
+	// 旧版按 "global:" (7) + 19 = 26 留出前缀宽度；前缀退役后收窄到 20。下限约束不变：
+	// 11 字节硬截断会把 "deepseek-v4.1-flash" 切成 "deepseek-v4."，看起来像另一个模型。
+	chatModelWidth = 20
 	// chatAcctWidth 容纳 "昵称(uid8)"：中文昵称按 2 列/字算，5 字中文 + "(xxxxxxxx)" = 20 列。
 	chatAcctWidth = 22
 	chatTTFBWidth = 8
@@ -482,7 +483,8 @@ const (
 // logChatRow 打印一行请求级表格日志（输出 chatLogOut，无 log 时间戳前缀）。
 //
 // 参数：
-//   - model：模型名（含 realm 前缀），超 chatModelWidth 截断（模型名是 ASCII，字节截即列宽）；
+//   - model：模型名（裸名，无域前缀；旧客户端发 "cn:xxx" 时已在上游侧归一为裸名），
+//     超 chatModelWidth 截断（模型名是 ASCII，字节截即列宽）；
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。

@@ -116,8 +116,9 @@ func main() {
 			GCInterval: cfg.SessionGCInterval,
 			Store:      store,
 			Available:  p.AvailableUIDs,
-			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
-			// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
+			// 裸模型名（新协议）→ 两域并集候选（cn 在前），会话可落在任一域；
+			// 仍带 "cn:"/"global:" 前缀的旧调用 → 单域候选（兼容语义）。闭包内部用
+			// resolveModel 判前缀；跨域自动路由的域合法性由 handler 按候选域校验。
 			AvailableForModel: realmAwareAvailableForModel(p),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
@@ -308,7 +309,8 @@ func main() {
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
-		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
+		// handler 侧第三道闸（global realm）：false（显式逃生门）时裸名恒按 cn 路由、
+		// 模型列表不列 global 名单（前缀已退役，列表输出裸名）。
 		GlobalEnabled: cfg.Global.Enabled,
 	})
 
